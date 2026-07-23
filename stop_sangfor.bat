@@ -50,14 +50,55 @@ if not "!PYTHON!"=="" (
 )
 
 :: 完全没有 Python
-echo [提示] 未检测到 Python 环境，需要 Python 3.7+
+echo [提示] 未检测到 Python 环境，正在扫描本地安装目录...
+
+:: ========== 本地目录兜底扫描 ==========
+for /d %%d in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
+    if exist "%%d\python.exe" (
+        set "PYTHON=%%d\python.exe"
+        echo   [检测] 找到: !PYTHON!
+        goto :check_local_python
+    )
+)
+for /d %%d in ("%ProgramFiles%\Python3*") do (
+    if exist "%%d\python.exe" (
+        set "PYTHON=%%d\python.exe"
+        echo   [检测] 找到: !PYTHON!
+        goto :check_local_python
+    )
+)
+for /d %%d in ("C:\Python3*") do (
+    if exist "%%d\python.exe" (
+        set "PYTHON=%%d\python.exe"
+        echo   [检测] 找到: !PYTHON!
+        goto :check_local_python
+    )
+)
+echo   未在常见目录找到 Python。
 
 :ask_download
 echo.
-echo 是否下载并安装 Python 3.12.9？
-echo.
-choice /c yn /n /m "  [Y] 下载安装  [N] 退出: "
+choice /c yns /n /m "  [Y] 下载安装 Python 3.12.9  [N] 退出  [S] 跳过继续（可能无法运行）: "
 if !errorlevel! equ 2 goto :exit
+if !errorlevel! equ 3 (
+    echo.
+    echo [警告] 跳过 Python 环境检测，若后续报错请先安装 Python 3.7+。
+    echo.
+    set "PYTHON=python"
+    goto :run_script
+)
+
+:: 选择 Y → 进入镜像选择 → 下载安装
+goto :select_mirror
+
+:check_local_python
+"!PYTHON!" -c "import sys; sys.exit(0 if sys.version_info >= (3,7) else 1)" >nul 2>&1
+if !errorlevel! equ 0 goto :run_script
+echo   版本低于 3.7，需要安装新版。
+set "PYTHON="
+goto :ask_download
+
+:select_mirror
 
 :: ========== 镜像选择 ==========
 echo.
