@@ -78,8 +78,14 @@ echo   未在常见目录找到 Python。
 
 :ask_download
 echo.
-choice /c yns /n /m "  [Y] 下载安装 Python 3.12.9  [N] 退出  [S] 跳过继续（可能无法运行）: "
-if !errorlevel! equ 2 goto :exit
+echo 未检测到可用的 Python 环境，请手动安装 Python 3.13.2（地址任选其一）：
+echo.
+echo   清华源: https://mirrors.tuna.tsinghua.edu.cn/python/3.13.2/python-3.13.2-amd64.exe
+echo   官方源: https://www.python.org/ftp/python/3.13.2/python-3.13.2-amd64.exe
+echo.
+echo 安装时请勾选 "Add python.exe to PATH"，完成后重新运行本脚本。
+echo.
+choice /c yns /n /m "  [Y] 打开下载页  [N] 退出  [S] 跳过继续（可能无法运行）: "
 if !errorlevel! equ 3 (
     echo.
     echo [警告] 跳过 Python 环境检测，若后续报错请先安装 Python 3.7+。
@@ -87,9 +93,14 @@ if !errorlevel! equ 3 (
     set "PYTHON=python"
     goto :run_script
 )
-
-:: 选择 Y → 进入镜像选择 → 下载安装
-goto :select_mirror
+if !errorlevel! equ 2 goto :exit
+:: Y → 浏览器打开清华源下载直链
+start "" "https://mirrors.tuna.tsinghua.edu.cn/python/3.13.2/python-3.13.2-amd64.exe"
+echo.
+echo 已在浏览器打开清华源下载地址；若未弹出，请复制上方链接手动下载。
+echo 安装完成后重新运行本脚本。
+pause
+exit /b 0
 
 :check_local_python
 "!PYTHON!" -c "import sys; sys.exit(0 if sys.version_info >= (3,7) else 1)" >nul 2>&1
@@ -97,109 +108,6 @@ if !errorlevel! equ 0 goto :run_script
 echo   版本低于 3.7，需要安装新版。
 set "PYTHON="
 goto :ask_download
-
-:select_mirror
-
-:: ========== 镜像选择 ==========
-echo.
-echo 请选择下载源：
-echo   [1] 清华 TUNA      (推荐 - 教育网/公网)
-echo   [2] 上海交大 SJTUG  (华东地区)
-echo   [3] 中科大 USTC
-echo   [4] 华为云          (公网通用)
-echo   [5] Python 官方     (海外，速度较慢)
-echo   [6] 退出
-echo.
-
-choice /c 123456 /n /m "请输入选项 [1-6]: "
-
-if !errorlevel! equ 6 goto :exit
-if !errorlevel! equ 5 (
-    set "MIRROR_URL=https://www.python.org/ftp/python/3.12.9/python-3.12.9-amd64.exe"
-    set "MIRROR_NAME=Python 官方"
-)
-if !errorlevel! equ 4 (
-    set "MIRROR_URL=https://mirrors.huaweicloud.com/python/3.12.9/python-3.12.9-amd64.exe"
-    set "MIRROR_NAME=华为云"
-)
-if !errorlevel! equ 3 (
-    set "MIRROR_URL=https://mirrors.ustc.edu.cn/python/3.12.9/python-3.12.9-amd64.exe"
-    set "MIRROR_NAME=中科大 USTC"
-)
-if !errorlevel! equ 2 (
-    set "MIRROR_URL=https://mirrors.sjtug.sjtu.edu.cn/python/3.12.9/python-3.12.9-amd64.exe"
-    set "MIRROR_NAME=上海交大 SJTUG"
-)
-if !errorlevel! equ 1 (
-    set "MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn/python/3.12.9/python-3.12.9-amd64.exe"
-    set "MIRROR_NAME=清华 TUNA"
-)
-
-set "INSTALLER=%TEMP%\python-3.12.9-amd64.exe"
-
-echo.
-echo ============================================
-echo  下载源: !MIRROR_NAME!
-echo ============================================
-
-:: 尝试 curl 下载 (Win10+ 自带，有进度条)
-where curl >nul 2>&1
-if !errorlevel! equ 0 (
-    echo 正在下载 Python 3.12.9 (~28MB) ...
-    curl -L -o "!INSTALLER!" "!MIRROR_URL!" --progress-bar
-    if !errorlevel! equ 0 (
-        echo 下载完成。
-        goto :install_python
-    )
-    echo curl 下载失败，尝试 PowerShell ...
-)
-
-:: PowerShell 下载 (带进度条)
-echo 正在下载 Python 3.12.9 (~28MB) ...
-powershell -Command "$ProgressPreference='Continue'; Invoke-WebRequest -Uri '!MIRROR_URL!' -OutFile '!INSTALLER!' -UseBasicParsing"
-if !errorlevel! neq 0 (
-    echo.
-    echo [错误] 下载失败，请检查网络连接后重试。
-    del "!INSTALLER!" >nul 2>&1
-    pause
-    exit /b 1
-)
-
-:install_python
-echo.
-echo 正在安装 Python 3.12.9 (显示进度条，约需 1-2 分钟)...
-"!INSTALLER!" /passive InstallAllUsers=1 PrependPath=1 Include_test=0 Include_launcher=1
-if !errorlevel! equ 0 (
-    del "!INSTALLER!" >nul 2>&1
-    echo.
-    echo [OK] Python 安装完成
-) else (
-    del "!INSTALLER!" >nul 2>&1
-    echo.
-    echo [警告] 安装程序返回异常代码: !errorlevel!
-    echo 请尝试手动安装: https://mirrors.tuna.tsinghua.edu.cn/python/
-    pause
-    exit /b 1
-)
-
-:: 刷新环境变量 PATH
-call :refresh_env
-
-:: 重新检测 Python
-set "PYTHON="
-where python >nul 2>&1 && set "PYTHON=python"
-if "!PYTHON!"=="" where py >nul 2>&1 && set "PYTHON=py"
-if "!PYTHON!"=="" where python3 >nul 2>&1 && set "PYTHON=python3"
-
-if "!PYTHON!"=="" (
-    echo.
-    echo [提示] 安装完成但 PATH 暂未生效，可能需要重启计算机。
-    echo 重启后重新运行此脚本即可。
-    pause
-    exit /b 0
-)
-
-echo [检测] Python: !PYTHON!
 
 :run_script
 echo.
@@ -236,11 +144,6 @@ echo.
 echo 按任意键退出...
 pause >nul
 exit /b 0
-
-:refresh_env
-for /f "tokens=2*" %%a in ('reg query "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v PATH 2^>nul') do set "SysPath=%%b"
-if defined SysPath set "PATH=!SysPath!;!PATH!"
-goto :eof
 
 :exit
 echo 已取消。
