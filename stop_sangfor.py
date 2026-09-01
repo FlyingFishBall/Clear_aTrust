@@ -164,6 +164,10 @@ KNOWN_SERVICES = [
     "eaio_service",
     "nac_monitor",
     "IngressMgr",
+    # EasyConnect/aTrust helper and protection components
+    "SangforSP",
+    "SangforPWEx",
+    "SfRemoveCallback",
 ]
 
 def stop_and_delete_services():
@@ -189,6 +193,8 @@ KNOWN_PROCS = [
     "eaio_service.exe", "eaio_agent.exe",
     "nac_monitor.exe", "nac_agent.exe",
     "IngressMgr.exe", "Ingress.exe",
+    "SangforCSClient.exe", "SangforPromote.exe",
+    "SangforPromoteService.exe", "SangforServiceClient.exe",
 ]
 
 def kill_known_processes():
@@ -216,7 +222,7 @@ def clean_critical_drivers():
         skip("WinDivert 驱动不存在")
 
     # SdpVnic + aTrustXtun
-    for name in ['SdpVnic', 'aTrustXtun']:
+    for name in ['SdpVnic', 'aTrustXtun', 'SangforPWEx', 'SfRemoveCallback']:
         run(f'sc stop {name}')
         rc, _, _ = run(f'sc delete {name}')
         if rc == 0:
@@ -343,9 +349,15 @@ def clean_browser_policies():
 KW = re.compile(
     r'sangfor|深信服|\batrust|ingress|eas(y)?connect|'
     r'eaio|nac_monitor|nac_agent|sdpvnic|'
-    r'\b(a|X)trust.*xtun|windivert',
+    r'\b(a|X)trust.*xtun|windivert|sfremove|sangforhelpertool',
     re.I,
 )
+
+# Rules left behind by Sangfor's service client after an incomplete uninstall.
+# They are removed only when they point to this exact, known stale executable.
+STALE_FIREWALL_PROGRAMS = [
+    r'C:\Program Files (x86)\Sangfor\SSL\SangforServiceClient\SangforServiceClient.exe',
+]
 
 
 def scan_all():
@@ -482,12 +494,32 @@ def delete_path(path):
         return False
 
 
+def clean_stale_firewall_rules():
+    """Remove firewall rules that reference deleted Sangfor executables."""
+    print("  清理 Sangfor 残留防火墙规则...")
+    for program in STALE_FIREWALL_PROGRAMS:
+        # netsh matches the exact application path and leaves unrelated rules intact.
+        rc, out, err = run(
+            f'netsh advfirewall firewall delete rule name=all program="{program}"',
+            timeout=15,
+        )
+        text = f"{out}\n{err}".lower()
+        if rc == 0 and ("deleted" in text or "删除" in text or "no rules" in text or "没有" in text):
+            ok(f"已清理防火墙规则: {program}")
+        elif rc == 0:
+            ok(f"已处理防火墙规则: {program}")
+        else:
+            fail(f"防火墙规则清理失败: {program} — {err.strip() or out.strip()}")
+
+
 def clean_all(results):
     print("[7/8] 清理残留")
     print("-" * 40)
 
     total = 0
     ok_count = 0
+
+    clean_stale_firewall_rules()
 
     for name in results['services']:
         total += 1
