@@ -16,13 +16,13 @@
 | 步骤 | 内容 | 说明 |
 | --- | --- | --- |
 | 0 | 检测并弹出官方卸载 | 扫描已安装的深信服/aTrust/Ingress 程序，引导官方卸载 |
-| 1 | 停止并删除已知服务 | eaio_service、nac_monitor、IngressMgr |
-| 2 | 终止残留进程 | eaio_service.exe、nac_monitor.exe、IngressMgr.exe 等 |
-| 3 | 清理内核驱动 | WinDivert、SdpVnic、aTrustXtun |
+| 1 | 停止并删除已知服务 | eaio_service、nac_monitor、IngressMgr、SangforSP、SangforPWEx、SfRemoveCallback |
+| 2 | 终止残留进程 | eaio_service.exe、nac_monitor.exe、IngressMgr.exe、SangforServiceClient.exe 等 |
+| 3 | 清理内核驱动 | WinDivert、SdpVnic、aTrustXtun、SangforPWEx、SfRemoveCallback |
 | 4 | 清理注册表 | Sangfor/Ingress 安装配置、事件日志、Services 子键残留 |
 | 5 | 清理浏览器组策略 | 解除由 aTrust 导致的 Chrome/Edge「您的浏览器由所属组织管理」 |
 | 6 | 全盘扫描残留 | 服务、驱动文件、DriverStore 驱动包、程序目录 |
-| 7 | 清除所有扫描到的残留 | 含标记重启后删除处理 |
+| 7 | 清除所有扫描到的残留 | 含标记重启后删除处理，并清理指向已删除 SangforServiceClient 的防火墙规则 |
 
 ### 第 4 步详情：注册表清理
 
@@ -32,6 +32,16 @@
 - `HKCU\SOFTWARE\Sangfor`（用户级配置）
 - `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\Ingress Manager`（事件日志）
 - 额外扫描 `Services` 分支下含 Sangfor 关键词的残留子键
+
+### Sangfor/EasyConnect 组件补充
+
+部分版本在 EasyConnect 会话退出或卸载失败后仍会留下以下组件：
+
+- `SangforSP`、`SangforPWEx`、`SfRemoveCallback` 服务/驱动
+- `C:\Program Files (x86)\SangforHelperTool` 及其 `SfRemoveCallback.sys`
+- 指向已删除 `SangforServiceClient.exe` 的 Windows 防火墙规则
+
+脚本会先停止并删除相关服务，扫描并清除上述目录/驱动文件（必要时标记为重启后删除），并按完整程序路径精确删除防火墙规则，不影响其他应用规则。
 
 ### 第 5 步详情：浏览器组策略修复
 
@@ -75,6 +85,7 @@
 
 | 版本 | 更新内容 |
 | --- | --- |
+| v1.3 | 补充 SangforSP/SangforPWEx/SfRemoveCallback 服务与驱动、SangforHelperTool 残留目录及 SangforServiceClient 防火墙规则清理 |
 | v1.2（2026-08-28） | 优化无 Python 环境时的下载逻辑：移除自动下载安装，改为提供清华源/官方源直链（Python 3.13.2）并打开浏览器，引导手动安装 |
 | v1.1.1 | 新增安装检测与注册表清理；Python 本地目录兜底扫描；新增跳过继续选项；修复编码与 PermissionError 等问题 |
 | v1.0.0 | 首个版本：aTrust 卸载残留一键清理 |
