@@ -490,11 +490,55 @@ def clean_workspace_virtual_drives():
 
 # ============ 步骤5：清理浏览器组策略 ============
 
+# ---- 浏览器策略的注册表位置 ----
+
+# Windows 是 32/64 位双视图（32 位视图实际落在 WOW6432Node 下）。
+# 如果 Python 进程是 32 位，访问 SOFTWARE\Policies 会被 WOW64 静默重定向到
+# 32 位视图 —— 也就是「以为查的是 64 位视图，其实不是」。显式带上
+# KEY_WOW64_64KEY / KEY_WOW64_32KEY 可以消除这种不确定性。
+VIEW_64 = getattr(winreg, 'KEY_WOW64_64KEY', 0)
+VIEW_32 = getattr(winreg, 'KEY_WOW64_32KEY', 0)
+
+# 32 位 Windows 上没有双视图，WOW64 视图标志会被系统忽略（MSDN：ignored
+# by 32-bit Windows），并非报错；此处显式退化为单视图，语义更清晰。
+# 注：注册表视图的划分与 CPU 架构无关——x64 与 ARM64 的 Windows 都是
+# "64 位原生视图 + WOW6432Node 32 位视图"两个视图，同一套逻辑通用。
+_ARCH = (os.environ.get('PROCESSOR_ARCHITEW6432')
+         or os.environ.get('PROCESSOR_ARCHITECTURE') or '').upper()
+IS_WIN64 = _ARCH in ('AMD64', 'ARM64', 'IA64')
+
+# 元组含义: (根键, 子键路径, 显示名, WOW64 视图标志)
+# 浏览器读策略是 HKLM 与 HKCU 都读，因此两个 hive 都要覆盖。
 BROWSER_POLICY_TARGETS = [
-    (r'SOFTWARE\Policies\Google\Chrome', 'Chrome'),
-    (r'SOFTWARE\Policies\Microsoft\Edge', 'Edge'),
-    (r'SOFTWARE\Policies\Chromium', 'Chromium'),
+    (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Policies\Google\Chrome', 'Chrome'),
+    (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Policies\Microsoft\Edge', 'Edge'),
+    (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\Policies\Chromium', 'Chromium'),
+    (winreg.HKEY_CURRENT_USER, r'SOFTWARE\Policies\Google\Chrome', 'Chrome（用户级）'),
+    (winreg.HKEY_CURRENT_USER, r'SOFTWARE\Policies\Microsoft\Edge', 'Edge（用户级）'),
 ]
+if IS_WIN64:
+    # 同一路径分别用 64/32 位视图各查一次
+    BROWSER_POLICY_TARGETS = (
+        [(h, p, lbl, VIEW_64) for h, p, lbl in BROWSER_POLICY_TARGETS if h == winreg.HKEY_LOCAL_MACHINE]
+        + [(h, p, lbl + ' · 32位视图', VIEW_32) for h, p, lbl in BROWSER_POLICY_TARGETS
+           if h == winreg.HKEY_LOCAL_MACHINE and 'Chromium' not in p]
+        + [(h, p, lbl, 0) for h, p, lbl in BROWSER_POLICY_TARGETS if h == winreg.HKEY_CURRENT_USER]
+    )
+else:
+    BROWSER_POLICY_TARGETS = [(h, p, lbl, 0) for h, p, lbl in BROWSER_POLICY_TARGETS]
+
+# 备份用: (视图标志过滤, reg.exe 路径, 备份文件名)
+# 只为「实际存在待清理目标」的根做备份，避免因不存在的键而整体中止
+BROWSER_POLICY_BACKUP_ROOTS = [
+    (winreg.HKEY_LOCAL_MACHINE, VIEW_64, r'HKLM\SOFTWARE\Policies',
+     'browser_policy_backup_HKLM.reg'),
+    (winreg.HKEY_CURRENT_USER, 0, r'HKCU\SOFTWARE\Policies',
+     'browser_policy_backup_HKCU.reg'),
+]
+if IS_WIN64:
+    BROWSER_POLICY_BACKUP_ROOTS.insert(
+        1, (winreg.HKEY_LOCAL_MACHINE, VIEW_32, r'HKLM\SOFTWARE\WOW6432Node\Policies',
+            'browser_policy_backup_HKLM32.reg'))
 
 # 判定某个浏览器策略项是否属于深信服注入（匹配其值内容）
 POLICY_SANGFOR_MARKERS = (
@@ -503,15 +547,16 @@ POLICY_SANGFOR_MARKERS = (
 )
 
 
-def _reg_enum_children(root, path):
+def _reg_enum_children(root, path, view=0):
     """枚举注册表键的直接子值与非空子键。
 
     返回 (values, subkeys)；values 为 [(name, type, data), ...]。
     键不存在或无权限时返回 (None, None)。
+    view 为 WOW64 视图标志（VIEW_64 / VIEW_32 / 0）。
     """
     values, subs = [], []
     try:
-        with winreg.OpenKey(root, path) as k:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ | view) as k:
             i = 0
             while True:
                 try:
@@ -532,15 +577,15 @@ def _reg_enum_children(root, path):
     return values, subs
 
 
-def _collect_policy_values(root, path, out):
+def _collect_policy_values(root, path, out, view=0):
     """递归收集策略键下所有叶子值，out += [(key_path, value_name, data)]"""
-    values, subs = _reg_enum_children(root, path)
+    values, subs = _reg_enum_children(root, path, view)
     if values is None:
         return
     for n, _, d in values:
         out.append((path, n, d))
     for s in subs:
-        _collect_policy_values(root, path + '\\' + s, out)
+        _collect_policy_values(root, path + '\\' + s, out, view)
 
 
 def _policy_value_is_sangfor(data):
@@ -553,18 +598,21 @@ def _policy_value_is_sangfor(data):
     return any(m in low for m in POLICY_SANGFOR_MARKERS)
 
 
-def _reg_prune_empty(root, path):
+def _reg_prune_empty(root, path, view=0):
     """自底向上删除空子键（值已被删光的策略项）"""
-    values, subs = _reg_enum_children(root, path)
+    values, subs = _reg_enum_children(root, path, view)
     if values is None:
         return
     for s in subs:
-        _reg_prune_empty(root, path + '\\' + s)
+        _reg_prune_empty(root, path + '\\' + s, view)
 
-    values, subs = _reg_enum_children(root, path)
+    values, subs = _reg_enum_children(root, path, view)
     if values is not None and not values and not subs:
         try:
-            winreg.DeleteKey(root, path)
+            if view:
+                winreg.DeleteKeyEx(root, path, view, 0)
+            else:
+                winreg.DeleteKey(root, path)
         except OSError:
             pass
 
@@ -577,72 +625,83 @@ def clean_browser_policies():
     ExtensionSettings / ProxySettings 等）。因此【不能整键删除】——
     那会把用户公司下发的合规策略一并抹掉。
 
-    本函数的处理顺序：
-      1. 先把整个 HKLM\\SOFTWARE\\Policies 导出为 .reg 备份，并打印回滚命令
-      2. 只自动删除「值内容含深信服特征字符串」的策略项
+    覆盖范围：HKLM 与 HKCU 两个 hive，且 HKLM 在 64 位系统上会分别检查
+    64 位与 32 位注册表视图（浏览器两者都读）。
+
+    处理顺序：
+      1. 先为「确实存在待清理目标」的根导出 .reg 备份，并打印回滚命令；
+         只要有一个必要的备份失败，本步整体跳过，避免删了无法恢复
+      2. 只自动删除「值内容含深信服特征字符串」的策略项，并回收空子键
       3. 其余非深信服项列成清单，交由用户确认后才删（默认保留）
     """
     print("[5/8] 清理浏览器组策略")
     print("-" * 40)
 
-    hive = winreg.HKEY_LOCAL_MACHINE
-    present = []
-    for sub, label in BROWSER_POLICY_TARGETS:
-        values, _ = _reg_enum_children(hive, sub)
+    # ---- 0) 找出实际存在的策略键 ----
+    present = []                      # (hive, subkey, label, view)
+    for hive, sub, label, view in BROWSER_POLICY_TARGETS:
+        values, _ = _reg_enum_children(hive, sub, view)
         if values is None:
-            skip(f"不存在: {label} 策略")
+            skip(f"不存在: {label}")
         else:
-            present.append((sub, label))
+            present.append((hive, sub, label, view))
 
     if not present:
         skip("无需刷新组策略")
         print()
         return
 
-    # ---- 1) 备份整个 Policies 键（三个厂商策略都在它下面）----
-    backup = os.path.join(os.getcwd(), 'browser_policy_backup.reg')
-    rc, _, err = run(f'reg export "HKLM\\SOFTWARE\\Policies" "{backup}" /y', timeout=30)
-    if rc == 0:
-        ok("已备份浏览器策略到: browser_policy_backup.reg")
-        print(f"        回滚命令: reg import \"{backup}\"")
-    else:
-        print("  [警告] 策略备份失败，本步跳过以免误删后无法恢复")
-        print(f"         {(err or '').strip()}")
-        print()
-        return
+    # ---- 1) 备份：只为实际要动的 hive+视图导出 ----
+    needed = set((hive, view) for hive, _, _, view in present)
+    backup_files = []
+    for hive, view, reg_path, fname in BROWSER_POLICY_BACKUP_ROOTS:
+        if (hive, view) not in needed:
+            continue
+        path = os.path.join(os.getcwd(), fname)
+        rc, _, err = run(f'reg export "{reg_path}" "{path}" /y', timeout=30)
+        if rc != 0:
+            print("  [警告] 策略备份失败，本步整体跳过以免误删后无法恢复")
+            print(f"         {reg_path} -> {(err or '').strip()}")
+            print()
+            return
+        backup_files.append((fname, path))
+
+    for fname, path in backup_files:
+        ok(f"已备份浏览器策略到: {fname}")
+    for fname, path in backup_files:
+        print(f"        回滚命令: reg import \"{path}\"")
 
     # ---- 2) 分类：深信服特征项 vs 其它 ----
-    sangfor_items, other_items = [], []
-    for sub, label in present:
+    sangfor_items, other_items = [], []   # (hive, key_path, val_name, label, view, preview)
+    for hive, sub, label, view in present:
         leaves = []
-        _collect_policy_values(hive, sub, leaves)
+        _collect_policy_values(hive, sub, leaves, view)
         for key_path, val_name, data in leaves:
             preview = str(data)
             if len(preview) > 60:
                 preview = preview[:57] + '...'
+            item = (hive, key_path, val_name, label, view, preview)
             if _policy_value_is_sangfor(data):
-                sangfor_items.append((key_path, val_name, label, preview))
+                sangfor_items.append(item)
             else:
-                other_items.append((key_path, val_name, label, preview))
+                other_items.append(item)
 
     # ---- 3) 自动删除深信服特征项 ----
     if sangfor_items:
         print(f"  发现 {len(sangfor_items)} 项深信服注入策略，正在清除：")
-        cleared = 0
-        for key_path, val_name, label, preview in sangfor_items:
+        for hive, key_path, val_name, label, view, preview in sangfor_items:
             try:
-                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                with winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE | view) as k:
                     winreg.DeleteValue(k, val_name)
                 ok(f"[{label}] 已删除 {val_name}  ({preview})")
-                cleared += 1
             except FileNotFoundError:
-                cleared += 1
+                pass
             except OSError as e:
                 fail(f"[{label}] 删除 {val_name} 失败: {e}")
 
         # 值删光后，把空掉的策略子键一并回收
-        for sub, _ in present:
-            _reg_prune_empty(hive, sub)
+        for hive, sub, _, view in present:
+            _reg_prune_empty(hive, sub, view)
     else:
         skip("未发现深信服注入的浏览器策略")
 
@@ -650,7 +709,7 @@ def clean_browser_policies():
     if other_items:
         print()
         print(f"  另发现 {len(other_items)} 项【非深信服特征】的浏览器策略：")
-        for key_path, val_name, label, preview in other_items:
+        for hive, key_path, val_name, label, view, preview in other_items:
             short = key_path.split('Policies\\')[-1]
             print(f"    [{label}] {short}\\{val_name} = {preview}")
         print()
@@ -662,23 +721,22 @@ def clean_browser_policies():
         except EOFError:
             ans = ''
         if ans == 'y':
-            for key_path, val_name, label, _ in other_items:
+            for hive, key_path, val_name, label, view, _ in other_items:
                 try:
-                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE) as k:
+                    with winreg.OpenKey(hive, key_path, 0, winreg.KEY_SET_VALUE | view) as k:
                         winreg.DeleteValue(k, val_name)
                     ok(f"[{label}] 已删除 {val_name}")
                 except FileNotFoundError:
                     pass
                 except OSError as e:
                     fail(f"[{label}] 删除 {val_name} 失败: {e}")
-            for sub, _ in present:
-                _reg_prune_empty(hive, sub)
+            for hive, sub, _, view in present:
+                _reg_prune_empty(hive, sub, view)
         else:
             skip("已保留以上策略（未做改动）")
 
     # ---- 5) 刷新策略 ----
-    printed = bool(sangfor_items) or bool(other_items)
-    if printed:
+    if sangfor_items or other_items:
         print("  正在刷新组策略...")
         rc, _, _ = run('gpupdate /force', timeout=30)
         if rc == 0:
