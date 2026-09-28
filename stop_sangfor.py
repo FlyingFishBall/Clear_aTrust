@@ -262,22 +262,18 @@ def clean_critical_drivers():
     print("[3/8] 清理内核驱动")
     print("-" * 40)
 
-    # WinDivert
-    run('sc stop WinDivert')
-    rc, _, _ = run('sc delete WinDivert')
-    if rc == 0:
-        ok("WinDivert 驱动已删除")
-    else:
-        skip("WinDivert 驱动不存在")
-
-    # SdpVnic + aTrustXtun
-    for name in ['SdpVnic', 'aTrustXtun', 'SangforPWEx', 'SfRemoveCallback']:
+    for name in ['WinDivert', 'SdpVnic', 'aTrustXtun', 'SangforPWEx', 'SfRemoveCallback']:
         run(f'sc stop {name}')
-        rc, _, _ = run(f'sc delete {name}')
-        if rc == 0:
+        rc, _, err = run(f'sc delete {name}')
+        if rc == 0 or '1060' in (err or ''):
             ok(f"{name} 驱动已删除")
         else:
-            skip(f"{name} 驱动不存在")
+            # 区分「真的不存在」与「存在但删除失败（占用/权限）」
+            rc2, _, _ = run(f'sc qc {name}')
+            if rc2 != 0:
+                skip(f"{name} 驱动不存在")
+            else:
+                fail(f"{name} 驱动删除失败: {(err or '').strip()}")
     print()
 
 
