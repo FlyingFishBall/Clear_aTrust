@@ -148,7 +148,7 @@ def auto_uninstall():
                                 pass
 
                             found.append((display_name, uninstall_str, quiet_str,
-                                          hkey_root, app_subkey_name))
+                                          hkey_root, f'{subkey_path}\\{app_subkey_name}'))
                     except FileNotFoundError:
                         pass
 
