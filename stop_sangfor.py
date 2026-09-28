@@ -899,6 +899,24 @@ def delete_path(path):
         return False
 
 
+def _firewall_delete_verdict(rc, out, err):
+    """判断 netsh advfirewall firewall delete rule 的结果。
+
+    返回 'ok'（删了规则）/ 'skip'（本无匹配规则，机器已干净）/ 'fail'（真错误）。
+
+    背景：netsh 在【没有匹配规则】时打印 "No rules match the specified
+    criteria."（中文系统为"没有与指定条件匹配的规则"）并返回退出码 1 ——
+    这不是错误，恰恰是干净状态。此前只认 rc==0，导致干净机器反而报
+    [失败]。（v1.3 PR #1 审查时已指出，此处正式修复）
+    """
+    text = f"{out}\n{err}".lower()
+    if "no rules" in text or "没有" in text or "不匹配" in text:
+        return "skip"
+    if rc == 0:
+        return "ok"
+    return "fail"
+
+
 def clean_stale_firewall_rules():
     """Remove firewall rules that reference deleted Sangfor executables."""
     print("  清理 Sangfor 残留防火墙规则...")
@@ -908,11 +926,11 @@ def clean_stale_firewall_rules():
             f'netsh advfirewall firewall delete rule name=all program="{program}"',
             timeout=15,
         )
-        text = f"{out}\n{err}".lower()
-        if rc == 0 and ("deleted" in text or "删除" in text or "no rules" in text or "没有" in text):
+        verdict = _firewall_delete_verdict(rc, out, err)
+        if verdict == "skip":
+            skip(f"无残留防火墙规则: {program}")
+        elif verdict == "ok":
             ok(f"已清理防火墙规则: {program}")
-        elif rc == 0:
-            ok(f"已处理防火墙规则: {program}")
         else:
             fail(f"防火墙规则清理失败: {program} — {err.strip() or out.strip()}")
 
