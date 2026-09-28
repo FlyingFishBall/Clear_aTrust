@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 # Licensed under the MIT License. Copyright (c) 2026 FlyingFishBall
 """
-深信服/Sangfor/aTrust 一键清理脚本
-功能：检测安装 → 弹出卸载 → 停服 → 杀进程 → 删驱动 → 清注册表 → 清浏览器策略 → 扫残留（含 DriverStore） → 清除
+深信服/Sangfor/aTrust 一键清理脚本  v1.4
+功能：检测安装 → 弹出卸载 → 停服 → 杀进程 → 删驱动 → 清注册表（含工作空间虚拟盘）
+      → 清浏览器策略 → 扫残留（含 DriverStore） → 清除
 需以管理员身份运行
 """
 import subprocess
@@ -45,6 +46,52 @@ def skip(msg):
     print(f"  [跳过] {msg}")
 
 
+# 注册表根键 → reg.exe 认识的 hive 前缀
+HIVE_PREFIX = {
+    winreg.HKEY_LOCAL_MACHINE: 'HKLM',
+    winreg.HKEY_CURRENT_USER: 'HKCU',
+}
+
+
+def delete_registry_key(hkey_root, subkey_path, label):
+    """删除整个注册表键树，返回是否成功。
+
+    优先用 winreg 直接操作；若键下仍有子键导致 DeleteKey 失败，再回退到
+    reg delete 并【校验返回码】。
+
+    背景（v1.3 及更早版本的 bug）：
+      1. 早期代码把路径拼成 'SOFTWARE\\...\\条目'，**丢了 HKLM/HKCU 根键前缀**。
+         微软文档明确要求 reg delete 的 keyname 必须含有效根键，否则命令必然失败。
+      2. 早期代码调用后不检查 `run()` 的返回码，无论成败都打印「已清除」，
+         造成假成功 —— 用户以为清掉了，实际残留还在。
+    """
+    hive = HIVE_PREFIX.get(hkey_root)
+    if hive is None:
+        fail(f"{label}: 未知的注册表根键，已跳过")
+        return False
+
+    # 1) 优先 winreg.DeleteKey（键下无子键时可直接删除）
+    try:
+        winreg.DeleteKey(hkey_root, subkey_path)
+        return True
+    except FileNotFoundError:
+        return True          # 已经不存在，等同于清理成功
+    except OSError:
+        pass                 # 键下可能还有子键，交给 reg.exe 递归删
+
+    # 2) 回退 reg delete（带完整 hive 前缀 + 校验返回码）
+    full = f'{hive}\\{subkey_path}'
+    rc, out, err = run(f'reg delete "{full}" /f', timeout=10)
+    if rc == 0:
+        return True
+
+    text = ((err or '') + (out or '')).lower()
+    if 'unable to find' in text or '找不到' in text:
+        return True          # 本来就不存在
+    fail(f"{label}: 删除失败 — {(err or out or '未知错误').strip()}")
+    return False
+
+
 # ============ 步骤0：检测并弹出卸载 ============
 
 SANGFOR_UNINSTALL_KW = re.compile(
@@ -65,7 +112,7 @@ def auto_uninstall():
     print("[0/8] 检测已安装的深信服/Ingress/aTrust 程序")
     print("-" * 40)
 
-    found = []  # (DisplayName, UninstallString, QuietUninstallString, subkey_path)
+    found = []  # (DisplayName, UninstallString, QuietUninstallString, hkey_root, subkey_name)
 
     for hkey_root, subkey_path in UNINSTALL_REG_ROOTS:
         try:
@@ -101,7 +148,7 @@ def auto_uninstall():
                                 pass
 
                             found.append((display_name, uninstall_str, quiet_str,
-                                          f'{subkey_path}\\{app_subkey_name}'))
+                                          hkey_root, app_subkey_name))
                     except FileNotFoundError:
                         pass
 
@@ -115,22 +162,23 @@ def auto_uninstall():
         return
 
     print(f"  发现 {len(found)} 个相关程序：")
-    for i, (name, uninst, _, _) in enumerate(found, 1):
+    for i, (name, uninst, _, _, _) in enumerate(found, 1):
         print(f"    [{i}] {name}")
 
     print()
     print("  将依次弹出卸载程序，请在每个卸载窗口中完成操作。")
     print()
 
-    for i, (name, uninst, quiet, key) in enumerate(found, 1):
+    for i, (name, uninst, quiet, hive_root, entry_sub) in enumerate(found, 1):
         print(f"  [{i}/{len(found)}] {name}")
+        entry_label = f"{HIVE_PREFIX.get(hive_root, '?')}\\{entry_sub}"
 
         cmd = uninst or quiet
         if not cmd:
-            skip(f"无法找到卸载命令，将直接删除注册表条目")
-            print(f"  正在清除注册表: {key}")
-            run(f'reg delete "{key}" /f', timeout=5)
-            ok(f"已清除注册表条目: {name}")
+            skip("无法找到卸载命令，将直接删除注册表条目")
+            print(f"  正在清除注册表: {entry_label}")
+            if delete_registry_key(hive_root, entry_sub, f"注册表条目 {name}"):
+                ok(f"已清除注册表条目: {name}")
             continue
 
         # 从卸载命令中提取exe路径
@@ -139,9 +187,10 @@ def auto_uninstall():
 
         if not os.path.isfile(exe_path):
             print(f"  卸载程序已被删除: {exe_path}")
-            print(f"  文件已不存在，将直接删除注册表条目")
-            run(f'reg delete "{key}" /f', timeout=5)
-            ok(f"已清除注册表条目: {name}")
+            print("  文件已不存在，将直接删除注册表条目")
+            print(f"  正在清除注册表: {entry_label}")
+            if delete_registry_key(hive_root, entry_sub, f"注册表条目 {name}"):
+                ok(f"已清除注册表条目: {name}")
             continue
 
         print(f"  正在启动卸载程序...")
@@ -304,7 +353,139 @@ def clean_sangfor_registry():
     else:
         skip("Services 下无 Sangfor 残留")
 
+    # 附加：工作空间虚拟盘残留（DOS Devices 持久化映射）
+    clean_workspace_virtual_drives()
+
     print()
+
+
+# ---- 步骤4 附加：工作空间虚拟盘残留 ----
+
+DOS_DEVICES_SUBKEY = r'SYSTEM\CurrentControlSet\Control\Session Manager\DOS Devices'
+
+# 判定虚拟盘是否属于深信服工作空间的路径关键字
+WORKSPACE_PATH_HINTS = ('sangfor', 'atrust', 'ingress', 'sfremovecallback')
+
+# DOS Devices 里盘符条目的值形如 \??\C:\path，需先剥掉这层前缀才能当路径用
+_DOS_PREFIXES = ('\\??\\', '\\DosDevices\\')
+
+
+def _strip_dos_prefix(text):
+    """剥掉 \\??\\ 或 \\DosDevices\\ 前缀"""
+    for prefix in _DOS_PREFIXES:
+        if text.upper().startswith(prefix.upper()):
+            return text[len(prefix):]
+    return text
+
+
+def classify_dos_entries(entries):
+    """把 DOS Devices 条目分成 可疑残留 / 保留 / 需人工确认 三类。
+
+    抽成纯函数是为了可以脱离注册表做单元测试。
+
+    entries: [(name, value), ...]
+    返回 (suspicious, kept, manual)
+        suspicious: [(name, letter, target, reason), ...]  ← 会清理
+        kept:       [(letter, target), ...]               ← 用户自己的合法映射
+        manual:     [(letter, target), ...]               ← 指向物理设备，不自动判断
+    """
+    suspicious, kept, manual = [], [], []
+
+    for name, value in entries:
+        clean_name = _strip_dos_prefix(name)
+        # 只关心盘符条目；AUX/CON/NUL/PRN/PIPE 等系统设备名一律跳过
+        if not re.match(r'^[A-Za-z]:$', clean_name):
+            continue
+
+        letter = clean_name.upper()
+        target = _strip_dos_prefix(value)
+
+        # 指向物理设备而非文件夹的，不做自动判断
+        if target.upper().startswith('\\DEVICE\\'):
+            manual.append((letter, target))
+            continue
+
+        low = target.lower()
+        if any(h in low for h in WORKSPACE_PATH_HINTS):
+            suspicious.append((name, letter, target, "目标路径含 Sangfor/aTrust 关键字"))
+        elif not os.path.exists(target):
+            suspicious.append((name, letter, target, "目标路径已不存在"))
+        else:
+            kept.append((letter, target))
+
+    return suspicious, kept, manual
+
+
+def clean_workspace_virtual_drives():
+    """清理 aTrust 工作空间遗留在 DOS Devices 下的持久化虚拟盘映射。
+
+    背景：aTrust 的「工作空间」除创建盘符映射外，还会在
+        HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\DOS Devices
+    下写入形如   M:  ->  \\??\\C:\\...   的持久化条目。
+    `subst M: /D` 只能解除【当前登录会话】的映射，删不掉这个注册表键，
+    所以重启后 Windows 会照着它把虚拟盘重新造出来。
+    必须删除该键下的对应条目才能根治。
+
+    安全策略：只删「盘符格式」且命中以下任一条的条目
+        · 目标路径含 Sangfor / aTrust / Ingress 关键字
+        · 目标路径已不存在（指向已被清理的目录）
+    Windows 自带的设备名条目（AUX / CON / NUL / PRN / PIPE 等）一律不碰，
+    用户自己的合法 subst 映射（目标存在且无深信服特征）也一律保留。
+    """
+    print("  检查工作空间虚拟盘残留 (DOS Devices)...")
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, DOS_DEVICES_SUBKEY) as k:
+            entries = []
+            i = 0
+            while True:
+                try:
+                    name, value, _ = winreg.EnumValue(k, i)
+                except OSError:
+                    break
+                i += 1
+                entries.append((name, str(value)))
+    except FileNotFoundError:
+        skip("DOS Devices 键不存在")
+        return
+    except OSError as e:
+        fail(f"读取 DOS Devices 失败: {e}")
+        return
+
+    suspicious, kept, manual = classify_dos_entries(entries)
+    for letter, target in manual:
+        print(f"    {letter} -> {target}  (设备路径，需人工确认，跳过)")
+    for letter, target in kept:
+        print(f"    {letter} -> {target}  (目标存在且无深信服特征，保留)")
+
+    if not suspicious:
+        skip("无虚拟盘残留")
+        return
+
+    print(f"  发现 {len(suspicious)} 个疑似工作空间虚拟盘残留：")
+    for _, letter, target, reason in suspicious:
+        print(f"    {letter} -> {target}")
+        print(f"        判据: {reason}")
+
+    print("  正在清除...")
+    cleared = 0
+    for name, letter, target, _ in suspicious:
+        # 先解除当前会话映射（失败不影响后续注册表删除）
+        run(f'subst {letter} /D')
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, DOS_DEVICES_SUBKEY, 0,
+                                winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, name)
+            ok(f"虚拟盘 {letter} 残留条目已清除")
+            cleared += 1
+        except FileNotFoundError:
+            ok(f"虚拟盘 {letter} 条目已不存在")
+            cleared += 1
+        except OSError as e:
+            fail(f"虚拟盘 {letter} 清除失败: {e}")
+
+    if cleared:
+        print("  提示: 重启后该虚拟盘不会再出现。")
 
 
 # ============ 步骤5：清理浏览器组策略 ============

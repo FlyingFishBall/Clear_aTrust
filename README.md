@@ -1,6 +1,6 @@
 # 深信服 / aTrust 卸载残留一键清理脚本
 
-> 当前版本：v1.2
+> 当前版本：v1.4
 
 批处理与 Python 组合脚本，深度清理深信服 aTrust 客户端在本机留下的残留，并修复残留文件导致的异常（包括但不限于未被完整卸载的残留进程、托盘无法退出的幽灵图标、浏览器中的无用策略、注册表残留、卸载残留文件等）。支持在清理前自动检测已安装程序并引导官方卸载。本脚本主要针对 aTrust，对 Sangfor / EasyConnect 部分重叠组件同样有效。
 
@@ -19,7 +19,7 @@
 | 1 | 停止并删除已知服务 | eaio_service、nac_monitor、IngressMgr、SangforSP、SangforPWEx、SfRemoveCallback |
 | 2 | 终止残留进程 | eaio_service.exe、nac_monitor.exe、IngressMgr.exe、SangforServiceClient.exe 等 |
 | 3 | 清理内核驱动 | WinDivert、SdpVnic、aTrustXtun、SangforPWEx、SfRemoveCallback |
-| 4 | 清理注册表 | Sangfor/Ingress 安装配置、事件日志、Services 子键残留 |
+| 4 | 清理注册表 | Sangfor/Ingress 安装配置、事件日志、Services 子键残留、**工作空间虚拟盘映射** |
 | 5 | 清理浏览器组策略 | 解除由 aTrust 导致的 Chrome/Edge「您的浏览器由所属组织管理」 |
 | 6 | 全盘扫描残留 | 服务、驱动文件、DriverStore 驱动包、程序目录 |
 | 7 | 清除所有扫描到的残留 | 含标记重启后删除处理，并清理指向已删除 SangforServiceClient 的防火墙规则 |
@@ -32,6 +32,17 @@
 - `HKCU\SOFTWARE\Sangfor`（用户级配置）
 - `HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\Ingress Manager`（事件日志）
 - 额外扫描 `Services` 分支下含 Sangfor 关键词的残留子键
+
+### 第 4 步附加：工作空间虚拟盘残留
+
+aTrust 的「工作空间」功能除创建盘符映射外，还会在 `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\DOS Devices` 下写入**持久化条目**（形如 `M:` → `\??\C:\...`）。用 `subst M: /D` 只能解除**当前登录会话**的映射，删不掉这个注册表键，所以重启后 Windows 会照着它把虚拟盘重新造出来——这正是「卸载后仍有 M:/N: 假盘，手动删了重启又回来」的原因。
+
+脚本会扫描该键，**只清理**以下两类盘符条目：
+
+- 目标路径含 `Sangfor` / `aTrust` / `Ingress` 关键字
+- 目标路径已不存在（指向已被清理的目录）
+
+Windows 自带的设备名条目（`AUX`、`CON`、`NUL`、`PRN`、`PIPE` 等）以及用户自己的合法 `subst` 映射一律保留，不受影响。清理完成后重启，虚拟盘不会再出现。
 
 ### Sangfor/EasyConnect 组件补充
 
@@ -85,7 +96,8 @@
 
 | 版本 | 更新内容 |
 | --- | --- |
-| v1.3 | 补充 SangforSP/SangforPWEx/SfRemoveCallback 服务与驱动、SangforHelperTool 残留目录及 SangforServiceClient 防火墙规则清理 |
+| v1.4（2026-09-28） | **修复**：第 0 步清理孤立卸载项时，注册表路径漏写 `HKLM`/`HKCU` 根键前缀，导致删除命令必定失败；且未校验返回值，无论成败都提示"已清除"。现改为优先用注册表 API 直接删除，并在失败时如实报错。**新增**：清理 aTrust 工作空间遗留在 `DOS Devices` 下的持久化虚拟盘映射（对应"卸载后重启仍出现 M:/N: 假盘"的问题） |
+| v1.3（2026-09-11） | 补充 SangforSP/SangforPWEx/SfRemoveCallback 服务与驱动、SangforHelperTool 残留目录及 SangforServiceClient 防火墙规则清理（感谢 @ljy-studio 贡献） |
 | v1.2（2026-08-28） | 优化无 Python 环境时的下载逻辑：移除自动下载安装，改为提供清华源/官方源直链（Python 3.13.2）并打开浏览器，引导手动安装 |
 | v1.1.1 | 新增安装检测与注册表清理；Python 本地目录兜底扫描；新增跳过继续选项；修复编码与 PermissionError 等问题 |
 | v1.0.0 | 首个版本：aTrust 卸载残留一键清理 |
