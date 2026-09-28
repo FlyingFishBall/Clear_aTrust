@@ -20,7 +20,7 @@
 | 2 | 终止残留进程 | eaio_service.exe、nac_monitor.exe、IngressMgr.exe、SangforServiceClient.exe 等 |
 | 3 | 清理内核驱动 | WinDivert、SdpVnic、aTrustXtun、SangforPWEx、SfRemoveCallback |
 | 4 | 清理注册表 | Sangfor/Ingress 安装配置、事件日志、Services 子键残留、**工作空间虚拟盘映射** |
-| 5 | 清理浏览器组策略 | 解除由 aTrust 导致的 Chrome/Edge「您的浏览器由所属组织管理」 |
+| 5 | 清理浏览器组策略 | 解除由 aTrust 导致的 Chrome/Edge「您的浏览器由所属组织管理」（仅删深信服特征项，不碰企业策略） |
 | 6 | 全盘扫描残留 | 服务、驱动文件、DriverStore 驱动包、程序目录 |
 | 7 | 清除所有扫描到的残留 | 含标记重启后删除处理，并清理指向已删除 SangforServiceClient 的防火墙规则 |
 
@@ -58,12 +58,14 @@ Windows 自带的设备名条目（`AUX`、`CON`、`NUL`、`PRN`、`PIPE` 等）
 
 深信服 aTrust 会向注册表注入策略，导致 Chrome/Edge 被"组织管理"，且在卸载后可能未被卸载程序正确清理：
 
-- 删除 `HKLM\SOFTWARE\Policies\Google\Chrome`（Chrome）
-- 删除 `HKLM\SOFTWARE\Policies\Microsoft\Edge`（Edge）
-- 删除 `HKLM\SOFTWARE\Policies\Chromium`（Chromium 内核浏览器）
-- 执行 `gpupdate /force` 刷新策略
+**为什么不整键删除**：企业 IT 通过组策略下发的合法浏览器策略（代理、强制安装扩展、`URLBlocklist`、`ExtensionSettings` 等）与 aTrust 注入的策略**位于同一个注册表键下**。直接删掉整个 `HKLM\SOFTWARE\Policies\Google\Chrome`，会把公司下发的合规策略一并抹掉。因此本脚本采用更保守的方式：
 
-执行后，`chrome://policy`以及 `edge://policy` 中残留的深信服策略项消失，浏览器恢复自主管理。
+1. 先把整个 `HKLM\SOFTWARE\Policies` 导出为同目录的 `browser_policy_backup.reg`，并打印回滚命令
+2. 只自动删除**值内容含深信服特征**（`sangfor` / `atrust` / `ingress` 等）的策略项，删空后回收残留的空子键
+3. 其余非深信服策略会**列成清单交给你确认**，默认保留；确认是残留、想一并清除时再输入 `y`
+4. 最后执行 `gpupdate /force` 刷新策略
+
+执行后，`chrome://policy` 与 `edge://policy` 中残留的深信服策略项消失，浏览器恢复自主管理。**若备份失败，本步会直接跳过**，避免出现删了却无法恢复的情况。
 
 ## 使用方法
 
@@ -96,7 +98,7 @@ Windows 自带的设备名条目（`AUX`、`CON`、`NUL`、`PRN`、`PIPE` 等）
 
 | 版本 | 更新内容 |
 | --- | --- |
-| v1.4（2026-09-28） | **修复**：第 0 步清理孤立卸载项时，注册表路径漏写 `HKLM`/`HKCU` 根键前缀，导致删除命令必定失败；且未校验返回值，无论成败都提示"已清除"。现改为优先用注册表 API 直接删除，并在失败时如实报错。**新增**：清理 aTrust 工作空间遗留在 `DOS Devices` 下的持久化虚拟盘映射（对应"卸载后重启仍出现 M:/N: 假盘"的问题） |
+| v1.4（2026-09-28） | **修复**：① 第 0 步清理孤立卸载项时，注册表路径漏写 `HKLM`/`HKCU` 根键前缀，导致删除命令必定失败；且未校验返回值，无论成败都提示"已清除"。现改为优先用注册表 API 直接删除，并在失败时如实报错。② 第 5 步原先整键删除浏览器策略，会连带删掉企业 IT 下发的合规策略；现改为先备份、只自动清除深信服特征项，其余列清单交用户确认。**新增**：清理 aTrust 工作空间遗留在 `DOS Devices` 下的持久化虚拟盘映射（对应"卸载后重启仍出现 M:/N: 假盘"的问题） |
 | v1.3（2026-09-11） | 补充 SangforSP/SangforPWEx/SfRemoveCallback 服务与驱动、SangforHelperTool 残留目录及 SangforServiceClient 防火墙规则清理（感谢 @ljy-studio 贡献） |
 | v1.2（2026-08-28） | 优化无 Python 环境时的下载逻辑：移除自动下载安装，改为提供清华源/官方源直链（Python 3.13.2）并打开浏览器，引导手动安装 |
 | v1.1.1 | 新增安装检测与注册表清理；Python 本地目录兜底扫描；新增跳过继续选项；修复编码与 PermissionError 等问题 |
